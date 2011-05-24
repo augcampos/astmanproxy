@@ -80,7 +80,11 @@ int _onconnect(struct mansession *s, struct message *m) {
 
 	char banner[100];
 
-	sprintf(banner, "%s/%s\r\n", PROXY_BANNER, PROXY_VERSION);
+	if( strlen( pc.forcebanner ) ) {
+		sprintf(banner, "%s\r\n", pc.forcebanner);
+	} else {
+		sprintf(banner, "%s/%s\r\n", PROXY_BANNER, PROXY_VERSION);
+	}
 	pthread_mutex_lock(&s->lock);
 	ast_carefulwrite(s->fd, banner, strlen(banner), s->writetimeout);
 	pthread_mutex_unlock(&s->lock);

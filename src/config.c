@@ -83,15 +83,25 @@ void *processline(char *s) {
 	memset (value,0,sizeof value);
 
 	do {
-		*s = tolower(*s);
+		if( nvstate < 2 ) {
+			*s = tolower(*s);
 
-		if ( *s == ' ' || *s == '\t')
-			continue;
-		if ( *s == ';' || *s == '#' || *s == '\r' || *s == '\n' )
-			break;
-		if ( *s == '=' ) {
-			nvstate = 1;
-			continue;
+			if ( nvstate == 1 && *s == '"' ) {
+				nvstate = 2;
+				continue;
+			}
+
+			if ( *s == ' ' || *s == '\t')
+				continue;
+			if ( *s == ';' || *s == '#' || *s == '\r' || *s == '\n' )
+				break;
+			if ( *s == '=' ) {
+				nvstate = 1;
+				continue;
+			}
+		} else {
+			if ( *s == '"' || *s == ';' || *s == '#' || *s == '\r' || *s == '\n' )
+				break;
 		}
 		if (!nvstate)
 			strncat(name, s, 1);
@@ -154,6 +164,8 @@ void *processline(char *s) {
 		strcpy(pc.outputformat, value);
 	else if (!strcmp(name,"inputformat") )
 		strcpy(pc.inputformat, value);
+	else if (!strcmp(name,"forcebanner") )
+		strcpy(pc.forcebanner, value);
 
 	return 0;
 }
