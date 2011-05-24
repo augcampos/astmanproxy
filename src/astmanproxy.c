@@ -59,6 +59,9 @@ void leave(int sig) {
 	struct iohandler *io;
 	struct ast_server *srv;
 	char iabuf[INET_ADDRSTRLEN];
+	void *res;
+	struct timespec ts;
+
 
 	/* Message to send to servers */
 	memset(&sm, 0, sizeof(struct message));
@@ -75,6 +78,12 @@ void leave(int sig) {
 		c = sessions;
 		sessions = sessions->next;
 
+		if( c->t ) {
+			ts.tv_sec = 1;	/* Timed join prevents us blocking */
+			ts.tv_nsec = 0;
+			pthread_cancel( c->t );
+			pthread_timedjoin_np( c->t, &res, &ts );
+		}
 		if (c->server) {
 			if (debug)
 				debugmsg("asterisk@%s: closing session", ast_inet_ntoa(iabuf, sizeof(iabuf), c->sin.sin_addr));
@@ -199,6 +208,8 @@ int WriteClients(struct message *m) {
 // If VALRET > 1, then we may want to send a retrospective NewChannel before
 // writing out this event...
 // Send the retrospective Newchannel from the cache (m->session->cache) to this client (c)...
+ 			if( debug > 4 )
+				debugmsg("Validate allowed a message to a client");
  			if( (valret & ATS_SRCUNIQUE) && m->session ) {
 				struct message m_temp;
 				memset(&m_temp, 0, sizeof(struct message) );
@@ -216,6 +227,8 @@ int WriteClients(struct message *m) {
 				c->output->write(c, &m_temp);
  			}
 			if (c->autofilter && c->actionid) {
+				if( debug > 5 )
+					debugmsg("Checking ActionID filtering");
 				actionid = astman_get_header(m, ACTION_ID);
 				if ( c->autofilter == 1 && !strcmp(actionid, c->actionid) )
 // Original AutoFilter
@@ -247,8 +260,7 @@ int WriteClients(struct message *m) {
 }
 
 int WriteAsterisk(struct message *m) {
-	int i;
-	char outstring[MAX_LEN], *dest;
+	char *dest;
 	struct mansession *u, *s, *first;
 
 	first = NULL;
@@ -281,16 +293,7 @@ int WriteAsterisk(struct message *m) {
 		return 1;
 
 	debugmsg("writing block to %s", s->server->ast_host);
-
-	pthread_mutex_lock(&s->lock);
-	for (i=0; i<m->hdrcount; i++) {
-		if (strcasecmp(m->headers[i], "Server:") ) {
-			sprintf(outstring, "%s\r\n", m->headers[i]);
-			ast_carefulwrite(s->fd, outstring, strlen(outstring), s->writetimeout );
-		}
-	}
-	ast_carefulwrite(s->fd, "\r\n", 2, s->writetimeout);
-	pthread_mutex_unlock(&s->lock);
+	s->output->write(s, m);
 	return 1;
 }
 
@@ -391,13 +394,16 @@ void *HandleAsterisk(struct mansession *s)
 		goto leave;
 	if (! (m = malloc(sizeof(struct message))) )
 		goto leave;
+	memset(m, 0, sizeof(struct message) );
 
 	// Signal settings are not always inherited by threads, so ensure we ignore this one
 	(void) signal(SIGPIPE, SIG_IGN);
 	for (;;) {
 		if (debug)
 			debugmsg("asterisk@%s: attempting read...", ast_inet_ntoa(iabuf, sizeof(iabuf), s->sin.sin_addr));
-		memset(m, 0, sizeof(struct message) );
+		m->hdrcount = 0;
+		m->in_command = 0;
+		m->session = (void*)0;
 		res = s->input->read(s, m);
 		m->session = s;
 
@@ -463,6 +469,10 @@ int ConnectAsterisk(struct mansession *s) {
 	AddHeader(&m, "Username: %s", s->server->ast_user);
 	AddHeader(&m, "Secret: %s", s->server->ast_pass);
 	AddHeader(&m, "Events: %s", s->server->ast_events);
+
+        s->inlen = 0;
+        s->inoffset = 0;
+        s->inbuf[0] = '\0';
 
 	for ( ;; ) {
 		if ( ast_connect(s) == -1 ) {
@@ -702,7 +712,6 @@ int main(int argc, char *argv[])
 				break;
 			case 'd':
 				debug++;
-				foreground=1;
 				break;
 			case 'h':
 				Usage();
