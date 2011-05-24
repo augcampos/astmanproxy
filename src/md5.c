@@ -18,7 +18,7 @@
  * will fill a supplied 16-byte array with the digest.
  */
 
-#include "endian.h"
+#include "amp_endian.h"
 #include "astmanproxy.h"
 #include "md5.h"
 

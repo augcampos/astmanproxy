@@ -27,7 +27,7 @@ SOBJS := $(HANDLERS:%=%.so)
 LIBS := -lssl
 
 # Add -g below for debug/GDB symbols
-CFLAGS:=-Wall -O2 -D_REENTRANT -D_GNU_SOURCE -fPIC -Isrc/include -I/usr/include/openssl
+CFLAGS:=-Wall -O2 -D_REENTRANT -D_GNU_SOURCE -fPIC -Isrc/include -I/usr/include/openssl 
 
 ifeq (${OSARCH},Darwin)  
   LIBS+=-lresolv
@@ -48,7 +48,7 @@ ifeq (${OSARCH},Darwin)
   MKTEMP=/usr/bin/mktemp
 else
   #These are used for all but Darwin
-  CFLAGS+=-I-
+  CFLAGS+=-iquotesrc/include
   LIBS+=-ldl -pthread
   ASTLINK=-Wl,-E
   SOLINK=-shared -Xlinker -x
