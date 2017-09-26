@@ -8,5 +8,6 @@ before_install:
 install: true
 
 script:
+  - make cert
   - make
   - make install
