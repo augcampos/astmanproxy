@@ -1,2 +1,12 @@
 language: c
 compiler: gcc
+
+before_install:
+  - sudo apt-get -qq update
+  - sudo apt-get install -y openssl openssl-devel
+
+install: true
+
+script:
+  - make
+  - make install
