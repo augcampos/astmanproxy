@@ -24,7 +24,7 @@ extern int  ValidateAction(struct message *m, struct mansession *s, int inbound)
 extern int  AddToStack(struct message *m, struct mansession *s, int withbody);
 extern void DelFromStack(struct message *m, struct mansession *s);
 extern void FreeStack(struct mansession *s);
-extern void ResendFromStack(char* uniqueid, struct mansession *s, struct message *m);
+extern void ResendFromStack(char* uniqueid, struct mansession *s, struct message *m, struct message *m2);
 
 int ConnectAsterisk(struct mansession *s);
 
@@ -32,7 +32,7 @@ struct proxyconfig pc;
 struct mansession *sessions = NULL;
 struct iohandler *iohandlers = NULL;
 
-pthread_mutex_t sessionlock;
+pthread_rwlock_t sessionlock;
 pthread_mutex_t serverlock;
 pthread_mutex_t userslock;
 pthread_mutex_t loglock;
@@ -73,7 +73,7 @@ void leave(int sig) {
 
 	if (debug)
 	debugmsg("Notifying and closing sessions");
-	pthread_mutex_lock (&sessionlock);
+	pthread_rwlock_wrlock(&sessionlock);
 	while (sessions) {
 		c = sessions;
 		sessions = sessions->next;
@@ -100,7 +100,7 @@ void leave(int sig) {
 		pthread_mutex_destroy(&c->lock);
 		free(c);
 	}
-	pthread_mutex_unlock (&sessionlock);
+	pthread_rwlock_unlock(&sessionlock);
 
 	/* unload server list */
 	while (pc.serverlist) {
@@ -130,7 +130,7 @@ void leave(int sig) {
 	logmsg("Proxy stopped; shutting down.");
 
 	fclose(proxylog);
-	pthread_mutex_destroy(&sessionlock);
+	pthread_rwlock_destroy(&sessionlock);
 	pthread_mutex_destroy(&loglock);
 	pthread_mutex_destroy(&debuglock);
 	exit(sig);
@@ -158,7 +158,7 @@ void destroy_session(struct mansession *s)
 	struct mansession *cur, *prev = NULL;
 	char iabuf[INET_ADDRSTRLEN];
 
-	pthread_mutex_lock(&sessionlock);
+	pthread_rwlock_wrlock(&sessionlock);
 	cur = sessions;
 	while(cur) {
 		if (cur == s)
@@ -178,7 +178,7 @@ void destroy_session(struct mansession *s)
 		free(s);
 	} else if (debug)
 		debugmsg("Trying to delete non-existent session %p?\n", s);
-	pthread_mutex_unlock(&sessionlock);
+	pthread_rwlock_unlock(&sessionlock);
 
 	/* If there are no servers and no clients, why are we here? */
 	if (!sessions) {
@@ -192,19 +192,59 @@ int WriteClients(struct message *m) {
 	char *actionid;
 	char *uniqueid;
 	char *event;
-	int valret;
+	int valret, autofilter;
 
-	c = sessions;
 
 	// We stash New Channel events in case they are filtered and need to be
 	// re-played at a later time. Hangup events also clean the list
 	// after being sent.
 	event = astman_get_header(m, "Event");
+	int is_nc = 0;
 	if( !strcasecmp( event, "Newchannel" ) ) {
 		AddToStack(m, m->session, 1);
+		is_nc = 1;	// Make sure we don't resend it from Stack.
+	} else if( !strcasecmp( event, "Newstate" ) ) {
+		AddToStack(m, m->session, 2);
+		is_nc = 1;      // Make sure we don't resend it from Stack.
 	}
+
+	pthread_rwlock_rdlock(&sessionlock);
+	c = sessions;
 	while (c) {
-		if ( !c->server && m->hdrcount>1 && (valret=ValidateAction(m, c, 1)) ) {
+		if ( c->server || m->hdrcount<2 ) {
+			if( debug > 4 && c->server )
+				debugmsg("Not sending server message back to a server");
+			if( debug > 4 && m->hdrcount<2 )
+				debugmsg("Skipping short message of %d lines.", m->hdrcount);
+			c = c->next;
+			continue;
+		}
+		autofilter = -1; // Default to not enabled...
+		if( debug > 8 )
+			debugmsg("Autofilter = %d, ActionID = %s", c->autofilter, c->actionid);
+		if (c->autofilter && c->actionid) {
+			if( debug > 5 )
+				debugmsg("Checking ActionID filtering");
+			actionid = astman_get_header(m, ACTION_ID);
+			if ( c->autofilter == 1 && !strcmp(actionid, c->actionid) )
+	// Original AutoFilter
+				autofilter = 1;
+			else if ( c->autofilter == 2 && *actionid == '\0' )
+	// No actionID, so filter does not apply.
+				autofilter = -1;
+			else if ( c->autofilter == 2 && !strncmp(actionid, c->actionid, strlen(c->actionid)) ) {
+	// New AutoFilter, actionid like "ast123-XX"
+				memmove( actionid, actionid+strlen(c->actionid), strlen(actionid)+1-strlen(c->actionid));
+				autofilter = 1;
+			} else if (debug > 5) {
+				autofilter = 0;
+				debugmsg("ActionID Filtered (blocked) a message to a client");
+			}
+		}
+
+                if ( pc.authrequired && !c->authenticated ) {
+                        debugmsg("Validate Filtered a message to a not-logged-in client");
+                } else if ( (valret=ValidateAction(m, c, 1)) || autofilter == 1 ) {
 // If VALRET > 1, then we may want to send a retrospective NewChannel before
 // writing out this event...
 // Send the retrospective Newchannel from the cache (m->session->cache) to this client (c)...
@@ -212,19 +252,37 @@ int WriteClients(struct message *m) {
 				debugmsg("Validate allowed a message to a client");
  			if( (valret & ATS_SRCUNIQUE) && m->session ) {
 				struct message m_temp;
-				memset(&m_temp, 0, sizeof(struct message) );
+				struct message m_temp2;
+				m_temp.hdrcount=0;
+				m_temp.in_command=0;
+				m_temp.session=m->session;
+				m_temp2.hdrcount=0;
+				m_temp2.in_command=0;
+				m_temp2.session=m->session;
 				uniqueid = astman_get_header(m, "SrcUniqueID");
-				ResendFromStack(uniqueid, m->session, &m_temp);
-				m_temp.session = m->session;
+				if( *uniqueid == '\0' )
+					uniqueid = astman_get_header(m, "Uniqueid1");
+				ResendFromStack(uniqueid, m->session, &m_temp, &m_temp2);
 				c->output->write(c, &m_temp);
+				if( m_temp2.hdrcount )
+					c->output->write(c, &m_temp2);
  			}
  			if( (valret & ATS_DSTUNIQUE) && m->session ) {
 				struct message m_temp;
-				memset(&m_temp, 0, sizeof(struct message) );
+				struct message m_temp2;
+				m_temp.hdrcount=0;
+				m_temp.in_command=0;
+				m_temp.session=m->session;
+				m_temp2.hdrcount=0;
+				m_temp2.in_command=0;
+				m_temp2.session=m->session;
 				uniqueid = astman_get_header(m, "DestUniqueID");
-				ResendFromStack(uniqueid, m->session, &m_temp);
-				m_temp.session = m->session;
+				if( *uniqueid == '\0' )
+					uniqueid = astman_get_header(m, "Uniqueid2");
+				ResendFromStack(uniqueid, m->session, &m_temp, &m_temp2);
 				c->output->write(c, &m_temp);
+				if( m_temp2.hdrcount )
+					c->output->write(c, &m_temp2);
  			}
 			if (c->autofilter && c->actionid) {
 				if( debug > 5 )
@@ -245,14 +303,19 @@ int WriteClients(struct message *m) {
 				c->output->write(c, m);
 
 			if (c->inputcomplete) {
-				pthread_mutex_lock(&c->lock);
-				c->outputcomplete = 1;
-				pthread_mutex_unlock(&c->lock);
+				if ( c->untilevent == '\0' || !strncasecmp( event, c->untilevent, MAX_LEN ) ) {
+					pthread_mutex_lock(&c->lock);
+					c->outputcomplete = 1;
+					pthread_mutex_unlock(&c->lock);
+					if( debug > 2 )
+						debugmsg("Set output complete flag. untilevent = %s, event = %s", c->untilevent, event);
+				}
 			}
 		} else if ( !c->server && m->hdrcount>1 && !valret && debug > 5)
 			debugmsg("Validate Filtered a message to a client");
 		c = c->next;
 	}
+	pthread_rwlock_unlock(&sessionlock);
 	if( !strcasecmp( event, "Hangup" ) ) {
 		DelFromStack(m, m->session);
 	}
@@ -266,7 +329,6 @@ int WriteAsterisk(struct message *m) {
 	first = NULL;
 	dest = NULL;
 
-	s = sessions;
 	u = m->session;
 
 	if( u->user.server[0] != '\0' )
@@ -275,6 +337,8 @@ int WriteAsterisk(struct message *m) {
 		dest = astman_get_header(m, "Server");
 
 	if (debug && *dest) debugmsg("set destination: %s", dest);
+	pthread_rwlock_rdlock(&sessionlock);
+	s = sessions;
 	while ( s ) {
 		if ( s->server && (s->connected > 0) ) {
 			if ( !first )
@@ -284,9 +348,10 @@ int WriteAsterisk(struct message *m) {
 		}
 		s = s->next;
 	}
-
 	if (!s)
-	s = first;	
+		s = first;	
+
+	pthread_rwlock_unlock(&sessionlock);
 
 	/* Check for no servers and empty block -- Don't pester Asterisk if it is one*/
 	if (!s || !s->server || (!m->hdrcount && !m->headers[0][0]) )
@@ -531,10 +596,10 @@ int StartServer(struct ast_server *srv) {
 	s->sin.sin_port = htons(atoi(s->server->ast_port));
 	s->fd = socket(AF_INET, SOCK_STREAM, 0);
 
-	pthread_mutex_lock(&sessionlock);
+	pthread_rwlock_wrlock(&sessionlock);
 	s->next = sessions;
 	sessions = s;
-	pthread_mutex_unlock(&sessionlock);
+	pthread_rwlock_unlock(&sessionlock);
 
 	logmsg("Allocated Asterisk server session for %s", ast_inet_ntoa(iabuf, sizeof(iabuf), s->sin.sin_addr));
 	if (debug) {
@@ -662,7 +727,6 @@ static void *accept_thread()
 		}
 		memset(s, 0, sizeof(struct mansession));
 		memcpy(&s->sin, &sin, sizeof(sin));
-		s->writetimeout = pc.clientwritetimeout;
 
 		/* For safety, make sure socket is non-blocking */
 		flags = fcntl(get_real_fd(as), F_GETFL);
@@ -675,10 +739,10 @@ static void *accept_thread()
 		s->writetimeout = pc.clientwritetimeout;
 		s->server = NULL;
 
-		pthread_mutex_lock(&sessionlock);
+		pthread_rwlock_wrlock(&sessionlock);
 		s->next = sessions;
 		sessions = s;
-		pthread_mutex_unlock(&sessionlock);
+		pthread_rwlock_unlock(&sessionlock);
 
 		logmsg("Connection received from %s", ast_inet_ntoa(iabuf, sizeof(iabuf), s->sin.sin_addr));
 		if (debug) {
@@ -708,7 +772,7 @@ int main(int argc, char *argv[])
 	{
 		switch( i ) {
 			case 'f':
-				foreground=1;
+ 				foreground=1;
 				break;
 			case 'd':
 				debug++;
@@ -752,7 +816,7 @@ int main(int argc, char *argv[])
 	(void) signal(SIGPIPE, SIG_IGN);
 
 	/* Initialize global mutexes */
-	pthread_mutex_init(&sessionlock, NULL);
+	pthread_rwlock_init(&sessionlock, NULL);
 	pthread_mutex_init(&userslock, NULL);
 	pthread_mutex_init(&loglock, NULL);
 	pthread_mutex_init(&debuglock, NULL);
@@ -783,6 +847,7 @@ int main(int argc, char *argv[])
 	serv_sock_addr.sin_port = htons((short)pc.listen_port);
 
 	/* Set listener socket re-use options */
+	flag = 1;
 	setsockopt(asock, SOL_SOCKET, SO_REUSEADDR, (void *)&flag, sizeof(flag));
 	lingerstruct.l_onoff = 1;
 	lingerstruct.l_linger = 5;

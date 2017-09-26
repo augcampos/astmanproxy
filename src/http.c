@@ -108,7 +108,10 @@ int ParseHTTPInput(char *buf, struct message *m) {
 		}
 		strncat(m->headers[m->hdrcount], v, n-v-1);
 		debugmsg("got hdr: %s", m->headers[m->hdrcount]);
-		m->hdrcount++;
+		if( m->hdrcount < MAX_HEADERS - 1 )
+			m->hdrcount++;
+		else
+			break;
 	}
 
 	return (m->hdrcount > 0);
@@ -161,8 +164,8 @@ int _read(struct mansession *s, struct message *m) {
 	/* No HTTP Input may be longer than BUFSIZE */
 
 	char line[MAX_LEN], method[10], formdata[MAX_LEN], status[15];
-	char *tmp;
 	int res, clength = 0;
+	int timer = 30000;
 
 	memset(method, 0, sizeof method);
 	memset(formdata, 0, sizeof formdata);
@@ -171,46 +174,57 @@ int _read(struct mansession *s, struct message *m) {
 	/* for http, don't do get_input forever */
 	for (;;) {
 
-		if (s->inputcomplete && !s->outputcomplete) {
-			sleep(1);
-			continue;
-		} else if (s->inputcomplete && s->outputcomplete)
-			return -1;
+		if (s->inputcomplete) {
+			/* The response has started, wait for timeout or completion. */
+			while( timer > 0 && !s->outputcomplete) {
+				usleep(10);
+				timer -= 10;
+			}
+			s->outputcomplete = 1;
+			return -1;	/* Cause connection to close */
+		}
 
 		memset(line, 0, sizeof line);
 		res = get_input(s, line);
-		debugmsg("res=%d, line: %s",res, line);
+		if (debug)
+			debugmsg("res=%d, line: %s",res, line);
 
-		if (res > 0) {
-			debugmsg("Got http: %s", line);
+		if (res > 0 && strlen(line)) {
+			debugmsg("Got http: %s (%d bytes)", line, strlen(line));
 
 			if ( !clength && !strncasecmp(line, "Content-Length: ", 16) )
 				clength = atoi(line+16);
+
+			if ( s->untilevent != '\0' && !strncasecmp(line, "X-Until-Event: ", 15) )
+				strncpy(s->untilevent, line+15, MAX_LEN-1);
+
+			if ( !strncasecmp(line, "X-Maxtime: ", 11) )
+				timer = atoi(line+11);
 
 			if (!*method) {
 				if ( !strncmp(line,"POST",4) ) {
 					strncpy(method, line, 4);
 				} else if ( !strncmp(line,"GET",3)) {
-					if ( strlen(line) > 14 && (tmp = strcasestr(line, " HTTP")) ) {
-						/* GET / HTTP/1.1 ---- this is bad */
+				if ( strlen(line) > 14 ) {
+					/* GET / HTTP/1.1 ---- this is bad */
 						/* GET /?Action=Ping&ActionID=Foo HTTP/1.1 */
 						strncpy(method, line, 3);
-						memcpy(formdata, line+6, tmp-line-6);
-						sprintf(status, "200 OK");
-					} else
-						sprintf(status, "501 Not Implemented");
+						memcpy(formdata, line+6, strstr(line, " HTTP")-line-6);
+					sprintf(status, "200 OK");
+				} else
+					sprintf(status, "501 Not Implemented");
 				}
 			}
 		} else if (res == 0) {
 			/* x-www-form-urlencoded handler */
 			/* Content-Type: application/x-www-form-urlencoded */
 			if (*method && !*formdata) {
-				if ( !strcasecmp(method, "POST") && clength && s->inlen==clength) {
-				pthread_mutex_lock(&s->lock);
-				strncpy(formdata, s->inbuf, clength);
-				s->inlen = 0;
-				pthread_mutex_unlock(&s->lock);
-				sprintf(status, "200 OK");
+				if ( !strcasecmp(method, "POST") && clength && (s->inlen - s->inoffset)==clength) {
+					pthread_mutex_lock(&s->lock);
+					strncpy(formdata, s->inbuf + s->inoffset, clength);
+					s->inlen = 0;
+					pthread_mutex_unlock(&s->lock);
+					sprintf(status, "200 OK");
 				}
 			}
 		}
@@ -218,7 +232,7 @@ int _read(struct mansession *s, struct message *m) {
 		if (res < 0)
 			break;
 
-		if (*status) {
+		if ((res == 0 || strlen(line) == 0) && *status) {
 			HTTPHeader(s, status);
 
 			/* now, let's transform and copy into a standard message block */

@@ -68,11 +68,26 @@ void *add_userperm(char* username, char *userspec, struct proxy_user **pu) {
 			case 6:
 			 user->more_events[0] = 'y';	// Any non-null entry
 			 break;
+			case 7:
+			 strncat(user->filters, s, 1);
+			 break;
 		}
 	} while (*(s++));
 
+	if( strcasestr(user->filters, FILT_TOK_CDRONLY) )
+		user->filter_bits |= FILT_CDRONLY;
+	if( strcasestr(user->filters, FILT_TOK_BRIONLY) )
+		user->filter_bits |= FILT_BRIONLY;
+	if( strcasestr(user->filters, FILT_TOK_XFRONLY) )
+		user->filter_bits |= FILT_XFRONLY;
+	if( strcasestr(user->filters, FILT_TOK_NOVAR) )
+		user->filter_bits |= FILT_NOVAR;
+
 	user->next = *pu;
 	*pu = user;
+
+	if (debug)
+		debugmsg("perm: %s, %s, %d", username, userspec, user->filter_bits);
 
 	return 0;
 }
@@ -99,9 +114,6 @@ void *processperm(char *s, struct proxy_user **pu) {
 		else
 			strncat(value, s, 1);
 	} while (*(s++));
-
-	if (debug)
-		debugmsg("perm: %s, %s", name, value);
 
 	add_userperm(name,value,pu);
 

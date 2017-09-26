@@ -1,7 +1,7 @@
 /*
 Copyright (c) 2002 Jorge Acereda  <jacereda@users.sourceforge.net> &
-                   Peter O'Gorman <ogorman@users.sourceforge.net>
-                   
+		   Peter O'Gorman <ogorman@users.sourceforge.net>
+		   
 Portions may be copyright others, see the AUTHORS file included with this
 distribution.
 
@@ -46,10 +46,10 @@ extern "C" {
  * Structure filled in by dladdr().
  */
 typedef struct dl_info {
-        const char      *dli_fname;     /* Pathname of shared object */
-        void            *dli_fbase;     /* Base address of shared object */
-        const char      *dli_sname;     /* Name of nearest symbol */
-        void            *dli_saddr;     /* Address of nearest symbol */
+	const char      *dli_fname;     /* Pathname of shared object */
+	void	    *dli_fbase;     /* Base address of shared object */
+	const char      *dli_sname;     /* Name of nearest symbol */
+	void	    *dli_saddr;     /* Address of nearest symbol */
 } Dl_info;
 
 extern int dladdr(const void * dl_restrict, Dl_info * dl_restrict);

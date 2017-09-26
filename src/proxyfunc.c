@@ -15,6 +15,7 @@ extern struct mansession *sessions;
 extern struct iohandler *iohandlers;
 extern pthread_mutex_t serverlock;
 extern pthread_mutex_t userslock;
+extern pthread_rwlock_t sessionlock;
 
 void *ProxyListIOHandlers(struct mansession *s) {
 	struct message m;
@@ -44,16 +45,20 @@ void *ProxyListSessions(struct mansession *s) {
 	memset(&m, 0, sizeof(struct message));
 	AddHeader(&m, "ProxyResponse: Success");
 
+	pthread_rwlock_rdlock(&sessionlock);
 	c = sessions;
-	while (c && (m.hdrcount < MAX_HEADERS - 1) ) {
+	while (c && (m.hdrcount < MAX_HEADERS - 4) ) {
 		if (!c->server) {
-			AddHeader(&m, "ProxyClientSession: %s", ast_inet_ntoa(iabuf, sizeof(iabuf), c->sin.sin_addr), c->actionid);
+			AddHeader(&m, "ProxyClientSession: %s", ast_inet_ntoa(iabuf, sizeof(iabuf), c->sin.sin_addr));
+			AddHeader(&m, "ProxyClientActionID: %s", c->actionid);
 			AddHeader(&m, "ProxyClientInputHandler: %s", c->input->formatname);
 			AddHeader(&m, "ProxyClientOutputHandler: %s", c->output->formatname);
 		} else 
 			AddHeader(&m, "ProxyServerSession: %s", ast_inet_ntoa(iabuf, sizeof(iabuf), c->sin.sin_addr));
 		c = c->next;
 	}
+	pthread_rwlock_unlock(&sessionlock);
+
 	s->output->write(s, &m);
 	return 0;
 }
@@ -89,9 +94,9 @@ int ProxyChallenge(struct mansession *s, struct message *m) {
 
 	memset(&mo, 0, sizeof(struct message));
 	AddHeader(&mo, "Response: Success");
+	AddHeader(&mo, "Challenge: %s", s->challenge);
 	if( actionid && strlen(actionid) )
 		AddHeader(&mo, "ActionID: %s", actionid);
-	AddHeader(&mo, "Challenge: %s", s->challenge);
 
 	s->output->write(s, &mo);
 	return 0;
@@ -165,8 +170,6 @@ void *ProxyLogin(struct mansession *s, struct message *m) {
 	actionid = astman_get_header(m, "ActionID");
 
 	memset(&mo, 0, sizeof(struct message));
-	if( actionid && strlen(actionid) > 0 )
-		AddHeader(&mo, "ActionID: %s", actionid);
 	if( debug )
 		debugmsg("Login attempt as: %s/%s", user, secret);
 
@@ -177,6 +180,8 @@ void *ProxyLogin(struct mansession *s, struct message *m) {
 			if (!AuthMD5(key, s->challenge, pu->secret) || !strcmp(secret, pu->secret) ) {
 				AddHeader(&mo, "Response: Success");
 				AddHeader(&mo, "Message: Authentication accepted");
+				if( actionid && strlen(actionid) > 0 )
+					AddHeader(&mo, "ActionID: %s", actionid);
 				s->output->write(s, &mo);
 				pthread_mutex_lock(&s->lock);
 				s->authenticated = 1;
@@ -186,6 +191,7 @@ void *ProxyLogin(struct mansession *s, struct message *m) {
 				strcpy(s->user.account, pu->account);
 				strcpy(s->user.server, pu->server);
 				strcpy(s->user.more_events, pu->more_events);
+				s->user.filter_bits = pu->filter_bits;
 				pthread_mutex_unlock(&s->lock);
 				if( debug )
 					debugmsg("Login as: %s", user);
@@ -211,15 +217,15 @@ void *ProxyLogin(struct mansession *s, struct message *m) {
 void *ProxyLogoff(struct mansession *s, struct message *m) {
 	struct message mo;
 	char *actionid = actionid = astman_get_header(m, "ActionID");
-
+ 
 	memset(&mo, 0, sizeof(struct message));
 	AddHeader(&mo, "Response: Goodbye");
 	AddHeader(&mo, "Message: Thanks for all the fish.");
 	if( actionid && strlen(actionid) > 0 )
 		AddHeader(&mo, "ActionID: %s", actionid);
-
+ 
 	s->output->write(s, &mo);
-
+ 
 	destroy_session(s);
 	if (debug)
 		debugmsg("Client logged off - exiting thread");
@@ -276,12 +282,15 @@ int ProxyDropServer(struct mansession *s, struct message *m) {
 
 	memset(&mo, 0, sizeof(struct message));
 	value = astman_get_header(m, "Server");
+
+	pthread_rwlock_rdlock(&sessionlock);
 	srv = sessions;
 	while (*value && srv) {
 		if (srv->server && !strcmp(srv->server->ast_host, value))
 			break;
 		srv = srv->next;
 	}
+	pthread_rwlock_unlock(&sessionlock);
 
 	if (srv) {
 		destroy_session(srv);
@@ -308,6 +317,7 @@ void *ProxyListServers(struct mansession *s) {
 	memset(&m, 0, sizeof(struct message));
 	AddHeader(&m, "ProxyResponse: Success");
 
+	pthread_rwlock_rdlock(&sessionlock);
 	c = sessions;
 	while (c) {
 		if (c->server) {
@@ -319,6 +329,8 @@ void *ProxyListServers(struct mansession *s) {
 
 		c = c->next;
 	}
+	pthread_rwlock_unlock(&sessionlock);
+
 	s->output->write(s, &m);
 	return 0;
 }
@@ -365,8 +377,9 @@ int proxyerror_do(struct mansession *s, char *err)
 		indexed on UniqueID.
    If SrcUniqueID / DestUniqueID are present, store against both.
    If a record already exists, do nothing.
-   withbody = 1, saves a copy of whole message (server).
    withbody = 0, saves just the key (client).
+   withbody = 1, saves a copy of whole message (server).
+   withbody = 2, saves a copy of a newstate message (server).
 */
 int do_AddToStack(char *uniqueid, struct message *m, struct mansession *s, int withbody)
 {
@@ -380,11 +393,21 @@ int do_AddToStack(char *uniqueid, struct message *m, struct mansession *s, int w
 	while( t ) {
 		if( !strncmp( t->uniqueid, uniqueid, sizeof(t->uniqueid) ) )
 		{
-			pthread_mutex_unlock(&s->lock);
-			return 0;
+			if( withbody < 2 ) {
+				// Already added
+				pthread_mutex_unlock(&s->lock);
+				return 0;
+			} else
+				// Found record to update
+				break;
 		}
 		prev = t;
 		t = t->next;
+	}
+	if( !t && withbody == 2 ) {
+		// No record found to update.
+		pthread_mutex_unlock(&s->lock);
+		return 0;
 	}
 	if( s->depth >= MAX_STACK ) {
 		struct mstack *newtop;
@@ -392,11 +415,13 @@ int do_AddToStack(char *uniqueid, struct message *m, struct mansession *s, int w
 		newtop = s->stack->next;
 		if( s->stack->message )
 			free( s->stack->message );
+		if( s->stack->state )
+			free( s->stack->state );
 		free( s->stack );
 		s->stack = newtop;
 		s->depth--;
 	}
-	if( (t = malloc(sizeof(struct mstack))) ) {
+	if( !t && (t = malloc(sizeof(struct mstack))) ) {
 		memset(t, 0, sizeof(struct mstack));
 		strncpy( t->uniqueid, uniqueid, sizeof(t->uniqueid) );
 		s->depth++;
@@ -404,28 +429,44 @@ int do_AddToStack(char *uniqueid, struct message *m, struct mansession *s, int w
 			prev->next = t;
 		else
 			s->stack = t;
+	}
+	if( t ) {
+		char *msg = NULL;
 		if( withbody ) {
 			// Save the message, in a reduced form to save memory...
 			int m_size;
 			int i, j;
+
 			m_size = 1;
 			j = 0;
 			for( i = 0; i < m->hdrcount; i++ ) {
 				m_size += strlen(m->headers[i])+1;
 			}
-			if( m_size < MAX_STACKDATA && (t->message = malloc(m_size)) ) {
-				memset(t->message, 0, m_size);
+			if( m_size < MAX_STACKDATA && (msg = malloc(m_size)) ) {
+				memset(msg, 0, m_size);
+				if( withbody == 1 ) {
+					if( t->message )
+						free( t->message );
+					t->message = msg;
+				} else {
+					if( t->state )
+						free( t->state );
+					t->state = msg;
+				}
 				for( i = 0; i < m->hdrcount; i++ ) {
-					strncpy( t->message + j, m->headers[i], m_size - j );
-					*(t->message + j + strlen(m->headers[i])) = '\n';
+					strncpy( msg + j, m->headers[i], m_size - j );
+					*(msg + j + strlen(m->headers[i])) = '\n';
 					j += strlen(m->headers[i]) + 1;
 				}
 			}
 		}
 		if( debug ) {
-			debugmsg("Added uniqueid: %s to %s stack", uniqueid, withbody?"server":"client");
-			if( t->message)
-				debugmsg("Cached message: %s", t->message);
+			if( withbody < 2 )
+				debugmsg("Added uniqueid: %s to %s stack", uniqueid, withbody?"server":"client");
+			else
+				debugmsg("Newstate for uniqueid: %s to %s stack", uniqueid, withbody?"server":"client");
+			if( withbody && msg )
+				debugmsg("Cached message: %s", msg);
 		}
 	}
 	pthread_mutex_unlock(&s->lock);
@@ -450,18 +491,32 @@ int AddToStack(struct message *m, struct mansession *s, int withbody)
 	if( uniqueid[0] != '\0' ) {
 		if( do_AddToStack(uniqueid, m, s, withbody) )
 			ret |= ATS_SRCUNIQUE;
-	} else
-		absent++;
+	} else {
+		uniqueid = astman_get_header(m, "Uniqueid1");
+		if( uniqueid[0] != '\0' ) {
+			if( do_AddToStack(uniqueid, m, s, withbody) )
+				ret |= ATS_SRCUNIQUE;
+		} else
+			absent++;
+	}
 
 	uniqueid = astman_get_header(m, "DestUniqueID");
 	if( uniqueid[0] != '\0' ) {
 		if( do_AddToStack(uniqueid, m, s, withbody) )
 			ret |= ATS_DSTUNIQUE;
-	} else
-		absent++;
+	} else {
+		uniqueid = astman_get_header(m, "Uniqueid2");
+		if( uniqueid[0] != '\0' ) {
+			if( do_AddToStack(uniqueid, m, s, withbody) )
+				ret |= ATS_DSTUNIQUE;
+		} else
+			absent++;
+	}
 
 	if( s->user.more_events[0] != '\0' && absent == 3 )
-		return 1;	// Want more/anonymous events
+		ret = 1;	// Want more/anonymous events
+	if (debug > 4 )
+		debugmsg("AddToStack for fd: %d returning: %d", s->fd, ret);
 	return ret;
 }
 
@@ -487,6 +542,8 @@ void DelFromStack(struct message *m, struct mansession *s)
 		{
 			if( t->message )
 				free( t->message );
+			if( t->state )
+				free( t->state );
 			if( prev )
 				prev->next = t->next;
 			else
@@ -513,9 +570,11 @@ void FreeStack(struct mansession *s)
 	t = s->stack;
 
 	while( t ) {
-		n = t->next;	// Grab next entry BEFORE we free the slot
+		n = t->next;		// Grab next entry BEFORE we free the slot
 		if( t->message )
 			free( t->message );
+		if( t->state )
+			free( t->state );
 		free( t );
 		t = n;
 		s->depth--;
@@ -551,8 +610,9 @@ int IsInStack(char* uniqueid, struct mansession *s)
 
 /* ResendFromStack - We want to resend a cached message from the stack please...
  * Look for "uniqueid" in cache of session "s", and reconstruct into message "m"
+ * If a Newstate has been seen, it gets put into "m2"
  */
-void ResendFromStack(char* uniqueid, struct mansession *s, struct message *m)
+void ResendFromStack(char* uniqueid, struct mansession *s, struct message *m, struct message *m2)
 {
 	struct mstack *t;
 
@@ -570,17 +630,36 @@ void ResendFromStack(char* uniqueid, struct mansession *s, struct message *m)
 		{
 			// Got message, pull from cache.
 			int i, h, j;
-			for( i=0,h=0,j=0; i<strlen(t->message) && i < MAX_STACKDATA-1 && h < MAX_HEADERS; i++ ) {
-				if( t->message[i] == '\n' || i-j >= 80 ) {
-					strncpy( m->headers[h], t->message + j, i-j );
-					m->headers[h][79] = '\0';
-					j = i + 1;
-					if( debug )
-						debugmsg("remade: %s", m->headers[h]);
-					h++;
+			if( t->message ) {
+				for( i=0,h=0,j=0; i < strlen(t->message) && i < MAX_STACKDATA - 1 && h < MAX_HEADERS - 1; i++ ) {
+					if( t->message[i] == '\n' || i-j >= MAX_LEN ) {
+						strncpy( m->headers[h], t->message + j, i-j );
+						m->headers[h][MAX_LEN-1] = '\0';
+						j = i + 1;
+						if( debug )
+							debugmsg("remade: %s", m->headers[h]);
+						h++;
+					}
 				}
-			}
-			m->hdrcount = h;
+				m->hdrcount = h;
+			} else
+				m->hdrcount = 0;
+
+			if( t->state ) {
+				for( i=0,h=0,j=0; i < strlen(t->state) && i < MAX_STACKDATA - 1 && h < MAX_HEADERS - 1; i++ ) {
+					if( t->state[i] == '\n' || i-j >= MAX_LEN ) {
+						strncpy( m2->headers[h], t->state + j, i-j );
+						m2->headers[h][MAX_LEN-1] = '\0';
+						j = i + 1;
+						if( debug )
+							debugmsg("remade: %s", m2->headers[h]);
+						h++;
+					}
+				}
+				m2->hdrcount = h;
+			} else
+				m->hdrcount = 0;
+
 			pthread_mutex_unlock(&s->lock);
 			return;
 		}
@@ -602,45 +681,126 @@ int ValidateAction(struct message *m, struct mansession *s, int inbound) {
 	char *account;
 	char *uniqueid;
 	char *tmp;
+	char *unmatched;
 	char *cheaders[] = {"Channel","Channel1","Channel2","Source","Destination","DestinationChannel","ChannelCalling",NULL};
-	int i, cmatched, cfound;
+	char *uheaders[] = {"UniqueID","Uniqueid1","Uniqueid2","SrcUniqueId","DestUniqueID",NULL};
+	int i, cmatched, cfound, ufound;
 
+	if( debug > 5 )
+		debugmsg("ValidateAction called for fd: %d, %s", s->fd, inbound?"inbound":"outbound");
 	if( pc.authrequired && !s->authenticated )
 		return 0;
 
-	if( inbound )	// Inbound to client from server
+	if( inbound )	// Inbound from server to client
 		ucontext = s->user.icontext;
 	else		// Outbound from client to server
 		ucontext = s->user.ocontext;
 	uchannel = s->user.channel;
 
-	// There is no filering, so just return quickly.
-	if( uchannel[0] == '\0' && ucontext[0] == '\0' && s->user.account[0] == '\0' )
+	// There is no other filering, so just return quickly.
+	if( uchannel[0] == '\0' && ucontext[0] == '\0' && s->user.account[0] == '\0' && s->user.filter_bits == 0 ) {
+		if( debug > 5 )
+			debugmsg("Message validated - no filtering");
 		return 1;
+	}
 
 	event = astman_get_header(m, "Event");
-	uniqueid = astman_get_header(m, "Uniqueid");
-	if( uniqueid[0] != '\0' && IsInStack(uniqueid, s) ) {
-		if( debug )
-			debugmsg("Message passed (uniqueid): %s already allowed", uniqueid);
-		if( !strcasecmp( event, "Hangup" ) )
-			DelFromStack(m, s);
-		return 1;
+
+	// If any "FILT" rules fail, then stop processing afterwards.
+	i = 1;
+	// Handle special filter flags before IsInStack checks
+	if( inbound ) {
+		if( s->user.filter_bits & FILT_CDRONLY ) {
+			if( !strcasecmp( event, "CDR" ) ) {
+				if( debug )
+					debugmsg("CDRONLY set. Is a CDR. Allowed");
+				return 1;
+			} else {
+				i = 0;
+			}
+		}
+		if( s->user.filter_bits & FILT_BRIONLY ) {
+			if( !strcasecmp( event, "Bridge" ) ) {
+				if( debug )
+					debugmsg("BRIONLY set. Is a Bridge. Allowed");
+				return 1;
+			} else {
+				i = 0;
+			}
+		}
+		if( s->user.filter_bits & FILT_XFRONLY ) {
+			if( !strcasecmp( event, "Transfer" ) ) {
+				if( debug )
+					debugmsg("XFRONLY set. Is a Transfer. Allowed");
+				return 1;
+			} else {
+				i = 0;
+			}
+		}
+		if( s->user.filter_bits & FILT_NOVAR ) {
+			if( !strcasecmp( event, "Set" ) ) {
+				if( debug )
+					debugmsg("NOVAR set. Blocked Set");
+				return 0;
+			} else if( !strcasecmp( event, "SetVar" ) ) {
+				if( debug )
+					debugmsg("NOVAR set. Blocked SetVar");
+				return 0;
+			} else if( !strcasecmp( event, "VarSet" ) ) {
+				if( debug )
+					debugmsg("NOVAR set. Blocked VarSet");
+				return 0;
+			}
+		}
 	}
-	uniqueid = astman_get_header(m, "Uniqueid1");
-	if( uniqueid[0] != '\0' && IsInStack(uniqueid, s) ) {
+	if( i == 0 ) {
 		if( debug )
-			debugmsg("Message passed (uniqueid1): %s already allowed", uniqueid);
-		if( !strcasecmp( event, "Hangup" ) )
-			DelFromStack(m, s);
-		return 1;
+			debugmsg("FILT_???ONLY rule blocked an event.");
+		return 0;
 	}
-	uniqueid = astman_get_header(m, "Uniqueid2");
-	if( uniqueid[0] != '\0' && IsInStack(uniqueid, s) ) {
-		if( debug )
-			debugmsg("Message passed (uniqueid2): %s already allowed", uniqueid);
-		if( !strcasecmp( event, "Hangup" ) )
-			DelFromStack(m, s);
+
+	unmatched = "";
+	ufound = 0;
+	for( i=0; uheaders[i] != NULL; i++ ) {
+		uniqueid = astman_get_header(m, uheaders[i]);
+		if( uniqueid[0] != '\0' && IsInStack(uniqueid, s) ) {
+			if( debug )
+				debugmsg("Message validated (%s): %s already allowed", uheaders[i], uniqueid);
+			if( !strcasecmp( event, "Hangup" ) )
+				DelFromStack(m, s);
+			ufound = 1;
+		} else if( *uniqueid ) {
+			if( debug > 6 )
+				debugmsg("UniqueID: %s not matched for this connection.", uniqueid);
+			unmatched = uniqueid;
+		}
+	}
+	if( ufound ) {
+		if( *unmatched == '\0' ) {
+			if( debug > 4 )
+				debugmsg("-- No unmatched header found.");
+			return 1;
+		}
+		if( *uchannel == '\0' ) {
+			if( debug > 4 )
+				debugmsg("-- chan filtering not enabled.");
+			return 1;
+		}
+
+	// We are allowing based on UID, but also have an unmatched UID
+	// If Channel matches, then also add that UID.
+		for( i=0; cheaders[i] != NULL; i++ ) {
+			channel = astman_get_header(m, cheaders[i]);
+			if( channel[0] == '\0' )
+				continue;	// No header by that name.
+			if( !strncasecmp( channel, uchannel, strlen(uchannel) )) {	// We have a Channel: header, so save the UID
+				if( debug > 4 )
+					debugmsg("-- Chan match, adding secondary UniqueID: %s", unmatched);
+				return AddToStack(m, s, 0) | 1;
+			}
+		}
+		if( debug > 4 )
+			debugmsg("-- No Chan match, NOT adding secondary UniqueID: %s", unmatched);
 		return 1;
 	}
 
@@ -649,10 +809,15 @@ int ValidateAction(struct message *m, struct mansession *s, int inbound) {
 	response = astman_get_header(m, "Response");
 	actionid = astman_get_header(m, ACTION_ID);
 	if( response[0] != '\0' && actionid[0] != '\0' && !strcmp(actionid, s->actionid) ) {
-		if (s->autofilter < 2 && !strcmp(actionid, s->actionid))
+		if (s->autofilter < 2 && !strcmp(actionid, s->actionid)) {
+			if( debug > 5 )
+				debugmsg("Message validated - actionID");
 			return 1;
-		else if ( !strncmp(actionid, s->actionid, strlen(s->actionid)) )
+		} else if ( !strncmp(actionid, s->actionid, strlen(s->actionid)) ) {
+			if( debug > 5 )
+				debugmsg("Message validated - actionID");
 			return 1;
+		}
 	}
 
 	action = astman_get_header(m, "Action");
@@ -701,16 +866,16 @@ int ValidateAction(struct message *m, struct mansession *s, int inbound) {
 				}
 			}
 		}
-		if( cfound && !cmatched ) {	// We find at least one matchable header, but no matches.
+		if( cfound && !cmatched ) {
 			if( debug )
-				debugmsg("Message filtered %d channel headers != %s", cfound, uchannel);
+				debugmsg("Message filtered %d chan headers != %s", cfound, uchannel);
 			return 0;
 		}
 	}
 
 	context = astman_get_header(m, "Context");
 	if( context[0] != '\0' && ucontext[0] != '\0' ) {
-		if( strcasecmp( context, ucontext ) ) {
+		if( strcmp( context, ucontext ) ) {
 			if( debug )
 				debugmsg("Message filtered (ctxt): %s != %s", context, ucontext);
 			return 0;
@@ -733,8 +898,12 @@ int ValidateAction(struct message *m, struct mansession *s, int inbound) {
 		}
 	}
 
-	// Outbound or unfiltered packets are passed.
+	// Outbound or unfiltered packets are validated.
 	if( !inbound || (uchannel[0] == '\0' && ucontext[0] == '\0') ) {
+		if( debug > 2 && !inbound )
+			debugmsg("Validate Passing an outbound message.");
+		if( debug > 2 && (uchannel[0] == '\0' && ucontext[0] == '\0') )
+			debugmsg("Validate Passing msg with no context or channel filter.");
 		return 1;
 	}
 

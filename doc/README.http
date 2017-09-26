@@ -22,3 +22,35 @@ See samples/httpast.html for a sample file that implements this.
 It would be best to use this with autofilter=on since right now you are 
 only going to get one response block back, and it might as well be 
 relevant. :)
+
+NEW FEATURE:
+============
+Problem(s) to solve
+-------------------
+For cases where the response to a posted command is very small, allowing
+potentially 1 second of pause may cause a real slowdown.
+
+For cases where the response to a posted command involves a potentially
+large block of data, waiting <1 second for it to complete may not be enough.
+
+Current solution
+----------------
+To resolve this conflict, you need to be in full control of the HTTP headers
+sent in your request, and send something like the following with your POST
+or GET:
+
+      X-Until-Event: QueueStatusComplete
+      X-Maxtime: 1000
+
+The X-Until-Event needs to match the completion event of the query you are
+making, and X-Maxtime is the most time the proxy will wait for it to arrive
+in milliseconds.
+
+Incidentally:
+
+If X-Maxtime: is not set, the default timeout is 30 seconds.
+
+If X-Until-Event: is not set, the response will include as many responses as
+Asterisk/astmanproxy can squeeze in before the http.c loop realises some data
+has been returned... This is not well defined!
+

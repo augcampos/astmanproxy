@@ -18,35 +18,59 @@ int get_input(struct mansession *s, char *output)
 {
 	/* output must have at least sizeof(s->inbuf) space */
 	int res;
-	int x;
+	int haveline;
+	int x, y1, y2, xtra;
 	struct pollfd fds[1];
 	char iabuf[INET_ADDRSTRLEN];
 
 	/* Look for \r\n from the front, our preferred end of line */
-	for (x=0;x<s->inlen;x++) {
-		if ( (s->inbuf[x] == '\n') && (x && s->inbuf[x-1] == '\r') ) {
+	haveline = 0;
+	*output = '\0';
+#define MIN(a,b) (a<b?a:b)
+	y1 = s->inoffset + s->inlen;
+	y2 = s->inoffset + MAX_LEN - 1;
+	/* y = MIN(s->inoffset + s->inlen, s->inoffset + MAX_LEN - 1); */
+	xtra = 0;
+
+	for (x=s->inoffset; x < y1; x++) {
+		if (s->inbuf[x] == '\n') {
+			if (x > s->inoffset && s->inbuf[x-1] == '\r') {
+				xtra = 1;
+			}
 			/* Copy output data not including \r\n */
-			memcpy(output, s->inbuf, x - 1);
+			memcpy(output, s->inbuf + s->inoffset, MIN(x - s->inoffset - xtra, y2 - s->inoffset - xtra));
 			/* Add trailing \0 */
-			output[x-1] = '\0';
+			output[x - s->inoffset - xtra] = '\0';
 			/* Move remaining data back to the front */
-			memmove(s->inbuf, s->inbuf + x + 1, s->inlen - x);
-			s->inlen -= (x + 1);
-			return 1;
+			s->inlen -= (x - s->inoffset + 1);
+			s->inoffset = x + 1;
+			haveline = 1;
+			break;
 		}
 	}
-
+	if( s->inlen == 0 )
+		s->inoffset = 0;
+	if( s->inoffset > (MAX_LEN_INBUF*3/4) || (s->inoffset > (MAX_LEN_INBUF/4) && MAX_LEN_INBUF - s->inlen - s->inoffset < MAX_LEN) ) {
+		memmove(s->inbuf, s->inbuf + s->inoffset, s->inlen);
+		s->inoffset = 0;
+		s->inbuf[s->inlen] = '\0';
+	}
 	if (s->inlen >= sizeof(s->inbuf) - 1) {
 		if (debug)
 			debugmsg("Warning: Got long line with no end from %s: %s\n", ast_inet_ntoa(iabuf, sizeof(iabuf), s->sin.sin_addr), s->inbuf);
 		s->inlen = 0;
+		s->inoffset = 0;
+		s->inbuf[0] = '\0';
 	}
+	if( haveline == 1 && (MAX_LEN_INBUF - s->inlen - s->inoffset < MAX_LEN || *output != '\0') )
+		return 1;
+
 	/* get actual fd, even if a negative SSL fd */
 	fds[0].fd = get_real_fd(s->fd);
 
 	fds[0].events = POLLIN;
 	do {
-		res = poll(fds, 1, -1);
+		res = poll(fds, 1, haveline?0:-1);
 		if (res < 0) {
 			if (errno == EINTR) {
 				if (s->dead)
@@ -59,19 +83,21 @@ int get_input(struct mansession *s, char *output)
 		} else if (res > 0) {
 			pthread_mutex_lock(&s->lock);
 			/* read from socket; SSL or otherwise */
-			res = m_recv(s->fd, s->inbuf + s->inlen, sizeof(s->inbuf) - 1 - s->inlen, 0);
+			res = m_recv(s->fd, s->inbuf + s->inoffset + s->inlen, sizeof(s->inbuf) - s->inoffset - 1 - s->inlen, 0);
 			pthread_mutex_unlock(&s->lock);
 			if (res < 1)
 				return -1;
 			break;
 
 		}
-	} while(1);
+	} while(!haveline);
 
 	/* We have some input, but it's not ready for processing */
-	s->inlen += res;
-	s->inbuf[s->inlen] = '\0';
-	return 0;
+	if( res > 0 ) {
+		s->inlen += res;
+		s->inbuf[s->inoffset + s->inlen] = '\0';
+	}
+	return haveline;
 }
 
 char *astman_get_header(struct message *m, char *var)

@@ -35,9 +35,12 @@ int _read(struct mansession *s, struct message *m) {
 			} else {
 				m->in_command = 0; // reset when block full
 			}
-		} else if (res < 0)
+		} else if (res < 0) {
+			if (debug) debugmsg("Read error %d getting line", res);
 			break;
+		}
 	}
+	if (debug>2) debugmsg("Returning standard block of %d lines, res %d", m->hdrcount, res);
 
 	return res;
 }
@@ -51,6 +54,9 @@ int _write(struct mansession *s, struct message *m) {
 	// This can have HUGE benefits under load.
 	at = 0;
 	pthread_mutex_lock(&s->lock);
+
+	if (debug>2) debugmsg("Transmitting standard block of %d lines, fd %d", m->hdrcount, s->fd);
+
 	for (i=0; i<m->hdrcount; i++) {
 		if( ! strlen(m->headers[i]) )
 			continue;

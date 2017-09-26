@@ -1,3 +1,46 @@
+astmanproxy (1.26) unstable; urgency=low
+
+   * Include MANY fixes roll-up from OOB development.
+   * Change sessionlock from MUTEX to RWLOCK
+   * Add several RDLOCK cases to prevent segfaults on connection close
+   * Include latest "Newstate" with packet replay code.
+   * Fix autofilter option for ActionID filtering.
+   * Fix replay filtering. Dial cmd seems to have changed.
+   * Fix buffer code to handle v.v.v.long lines on input.
+   * Additional bounds checking on MAX_HEADERS to try and
+     catch a core dump.
+   * New FILT_BRIONLY and FILT_XFRONLY rules
+   * Clean up server connection buffer before trying
+     to connect.
+   * Cancel threads before cleaning up their memory.
+   * Increase the input buffer and optimise how the buffer is managed
+   * Very busy systems can get backlogged on read buffers
+     Try to resolve this by polling for new data on every read.
+ 
+ -- Steve Davies <steved@ipcortex.co.uk>  Wed,  4 Apr 2012 14:54:46 +0100
+
+astmanproxy (1.23.2) unstable; urgency=low
+
+  * Improved I/O for very busy systems.
+  * Massive performance boost - No need to bzero quite so much.
+  * Clean out server buffers before re-opening.
+  * Shutdown tries to nicely clean up threads.
+  * New forcebanner option to set the initial banner output.
+  * Attempt to handle quoted values in config file.
+  * Matching on context is now correctly case-sensitive.
+
+ -- Steve Davies <steved@ipcortex.co.uk>  Tue, 24 May 2011 12:32:22 +0100
+
+astmanproxy (1.23.1) unstable; urgency=low
+
+  * Segfault fix in standard.so
+  * 100% CPU usage fix in httpd.so
+  * New Autofilter mechanism added
+  * Version number bumped to 1.23
+  * Correct build deps in debian package info (fixed by nud)
+
+ -- Steve Davies <steved@ipcortex.co.uk>  Fri, 27 Feb 2009 14:40:04 +0000
+
 astmanproxy (1.21.90) unstable; urgency=low
 
   * Correcting the attribution in this file as it was never

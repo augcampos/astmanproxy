@@ -1,5 +1,39 @@
-1.25	Change to version 1.25 (augcampos)
-	Some packets should not or can not be filtered. (Steve Davies)
+1.28
+	Time for a new tagged version
+	HTTP speed up for large responses
+
+1.27
+	Not sure why this was never mentioned here?
+
+1.26
+	Additional filter options to pass.
+        brionly: Only Bridge events.
+        xfronly: Only Transfer events.
+        Combined ???only filters allow all matching types to pass.
+	Fix long standing crash due to insufficient locking.
+	Fix a couple of possible crash/core dump cases.
+	Enhanced packet replay code.
+	Fix autofilter option for ActionID filtering.
+	Fix replay filtering. Dial cmd seems to have changed.
+	Fix buffer code to handle v.v.v.long lines on input.
+		(Would hang data stream)
+
+1.25
+	Minor makefile tweak
+
+1.24pre110524
+	Improved I/O buffering for very busy systems.
+	Performance boost - No need to bzero quite so much.
+	Clean out server buffers before re-opening.
+	Shutdown tries to nicely clean up threads.
+	New forcebanner option to set the initial banner output.
+	Attempt to handle quoted values in config file.
+	Matching on context is now correctly case-sensitive.
+	Fix priority of cdronly and novar filters
+
+1.24pre110203 - Add new filter types per-user
+        cdronly: Only CDR events
+        novar: Block SetVar/VarSet events
 
 1.24pre090304 - Add -f option to run in foreground
 	support for Asterisk 1.6.x Channel: headers (Sebastian)

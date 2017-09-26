@@ -249,11 +249,17 @@ Any non-empty string provided in "more_events" will allow the passing
 of non-filterable events to all clients. The default behaviour is to
 block these packets if any form of filtering is requested.
 
-user=secret,channel,out_context (to Asterisk),in_context (From Asterisk),accountcode,server,more_events
+Filters is a pipe-separated list of extra filter options. At present the following values have meaning:
+	cdronly - Only pass Event: CDR records to this client. Other ???only filters are allowed.
+	brionly - Only pass Event: Bridge events to this client. Other ???only filters are allowed.
+	xfronly - Only pass Event: Transfer events to this client. Other ???only filters are allowed.
+	novar - Pre-pass filter removes all SetVar/VarSet events
+
+user=secret,channel,out_context (to Asterisk),in_context (From Asterisk),accountcode,server,more_events,filters
 
 e.g.:
   steve=steve,SIP/snom190,local,
-  dave=securepass,SIP/1002,,,davesaccount,daveserver
+  dave=securepass,SIP/1002,,,davesaccount,daveserver,y,cdronly|novar
   bill=pass
 
 ===================================================================

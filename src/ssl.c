@@ -216,6 +216,8 @@ int m_recv(int s, void *buf, size_t len, int flags)
 
 	if (ret > 0)
 		rec_bytes += ret;
+	if ( debug && ret < 0 )
+		debugmsg("Read error %d", ret);
 
 	if (debug && s<-1)
 		debugmsg("Received %d bytes from SSL socket", ret);

@@ -25,10 +25,11 @@
 #endif
 
 #define BUFSIZE		 1024
-#define MAX_HEADERS	 128
-#define MAX_LEN		 16384
+#define MAX_HEADERS	 256
+#define MAX_LEN		 1024
+#define MAX_LEN_INBUF	 (1024*1024)
 #define MAX_STACK	 1024
-#define MAX_STACKDATA	 32768
+#define MAX_STACKDATA	 (1024*32)
 
 #define ATS_RESERVED    1
 #define ATS_UNIQUE      2
@@ -60,7 +61,21 @@ struct proxy_user {
 	char account[80];
 	char server[80];
 	char more_events[2];
+	char filters[80];
+	unsigned int filter_bits;
 	struct proxy_user *next;
+};
+
+#define FILT_TOK_CDRONLY "cdronly"
+#define FILT_TOK_BRIONLY "brionly"
+#define FILT_TOK_XFRONLY "xfronly"
+#define FILT_TOK_NOVAR   "novar"
+
+enum filters {
+	FILT_CDRONLY = (1 << 0),	/* Only pass CDR events. Nothing else (except other FILT_???ONLY). */
+	FILT_BRIONLY = (1 << 1),	/* Only pass Bridge events. Nothing else (except other FILT_???ONLY). */
+	FILT_XFRONLY = (1 << 2),	/* Only pass Transfer events. Nothing else (except other FILT_???ONLY). */
+	FILT_NOVAR =   (1 << 3),	/* Never send SetVar/VarSet events to this client */
 };
 
 struct proxyconfig {
@@ -85,6 +100,7 @@ struct proxyconfig {
 	int acceptencryptedconnection;	/* accept encrypted connections? */
 	int acceptunencryptedconnection;	/* accept unencrypted connections? */
 	char certfile[256];			/* our SERVER-side SSL certificate file */
+	char forcebanner[80];			/* override banner output in 'standard' protocol */
 };
 
 struct iohandler {
@@ -100,6 +116,7 @@ struct mstack {
 	struct mstack *next;
 	char uniqueid[80];
 	char *message;
+	char *state;
 };
 
 struct mansession {
@@ -107,8 +124,9 @@ struct mansession {
 	pthread_mutex_t lock;
 	struct sockaddr_in sin;
 	int fd;
-	char inbuf[MAX_LEN];
+	char inbuf[MAX_LEN_INBUF];
 	int inlen;
+	int inoffset;
 	struct iohandler *input;
 	struct iohandler *output;
 	int autofilter;
@@ -121,6 +139,7 @@ struct mansession {
 	struct ast_server *server;
 	struct proxy_user user;
 	char actionid[MAX_LEN];
+	char untilevent[MAX_LEN];
 	char challenge[10];			/*! Authentication challenge */
 	int writetimeout;  			/* Timeout for ast_carefulwrite() */
 	struct mstack *stack;
@@ -149,6 +168,7 @@ int StartServer(struct ast_server *srv);
 int WriteAsterisk(struct message *m);
 char *astman_get_header(struct message *m, char *var);
 int proxyerror_do(struct mansession *s, char *err);
+int get_input_block(struct mansession *s, struct message *m);
 int get_input(struct mansession *s, char *output);
 int SetIOHandlers(struct mansession *s, char *ifmt, char *ofmt);
 void destroy_session(struct mansession *s);
